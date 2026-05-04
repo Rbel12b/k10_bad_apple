@@ -14,6 +14,9 @@
 
 // ── SD Card (shares SPI bus with LCD) ────────────────────────────────────────
 #define K10_SD_CS         40
+#define K10_SD_SCK        44
+#define K10_SD_MISO       41
+#define K10_SD_MOSI       42
 #define K10_SD_FREQ       20000000UL
 
 // ── Camera (OV2640, 8-bit parallel) ──────────────────────────────────────────

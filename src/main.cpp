@@ -399,8 +399,8 @@ void setup()
     i2s_set_pin(I2S_PORT, &pins);
     i2s_zero_dma_buffer((i2s_port_t)0);
 
-    SPI.begin(44, 41, 42, -1);
-    // if (!SD.begin(K10_SD_CS, SPI, K10_SD_FREQ, "/sdcard"))
+    SPI.begin(K10_SD_SCK, K10_SD_MISO, K10_SD_MOSI, -1);
+
     if (!SD.begin())
     {
         log_d("ERROR: SD card mount failed!");
