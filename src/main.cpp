@@ -141,7 +141,7 @@ void audioStreamTask(void *param)
         size_t readBytes = aFile.read((uint8_t*)aBuf, AUDIO_DMA_BUF_LEN);
         for (size_t i = 0; i < readBytes / 2; ++i)
         {
-            aBuf[i] = aBuf[i] >> 8;
+            aBuf[i] = aBuf[i] >> 4;
         }
         // Play audio
         i2s_write(I2S_PORT, aBuf, readBytes, &bytes_written, portMAX_DELAY);
@@ -333,6 +333,8 @@ void videoStreamTask(void *param)
 
     vFile.close();
     videoStreamDone = true;
+
+    _tft.fillScreen(TFT_BLACK);
 
     log_d("MJPEG video end, skipped frames: %d", skipped_frames);
 
