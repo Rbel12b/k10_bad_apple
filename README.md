@@ -13,10 +13,10 @@ Plays the Bad Apple!! video with synchronized audio on a [DFRobot UNIHIKER K10](
 
 | Component | Details |
 | --- | --- |
-| Board | UNIHIKER K10 (ESP32-S3, 16MB flash, PSRAM) |
+| Board | UNIHIKER K10 (ESP32-S3, 16MB flash, 8MB PSRAM) |
 | Display | ILI9341, 320×240, SPI @ 40 MHz |
 | Audio | I2S speaker (mono, 44100 Hz) |
-| Storage | SD card (separate SPI bus @ 20 MHz) |
+| Storage | SD card (separate SPI bus @ 40 MHz) |
 | I/O expander | XL9535 (I2C) — controls LCD backlight and amp gain |
 
 ## Video files
