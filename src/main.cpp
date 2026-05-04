@@ -103,6 +103,8 @@ void _xl9535WritePin(uint8_t pin, bool val)
     _xl9535Flush(port);
 }
 
+SPIClass SPI1(HSPI);
+
 void setup()
 {
     WiFi.mode(WIFI_OFF);
@@ -113,26 +115,21 @@ void setup()
     Wire.setTimeOut(100);
     _initXL9535();
 
+    SPI1.begin(K10_LCD_SCK, K10_LCD_MISO, K10_LCD_MOSI, -1);
+
     // Init Video
     _tft.init();
+    _tft.setRotation(2);
     _tft.fillScreen(TFT_BLACK);
 
     _xl9535WritePin(0, true); // backlight on after display init
-
-    // Init SD card
-    if (!SD.begin(K10_SD_CS, SPI, K10_LCD_FREQ, "/sdcard"))
-    {
-        Serial.println(F("ERROR: SD card mount failed!"));
-        _tft.println(F("ERROR: SD card mount failed!"));
-        return;
-    }
 
     // Init Audio
     i2s_config_t cfg = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
         .sample_rate = 44100,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
-        .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_STAND_PCM_SHORT | I2S_COMM_FORMAT_STAND_I2S),
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
         .dma_buf_count = 8,
@@ -158,6 +155,14 @@ void setup()
 
     i2s_set_pin(I2S_PORT, &pins);
     i2s_zero_dma_buffer((i2s_port_t)0);
+
+    // Init SD card
+    if (!SD.begin(K10_SD_CS, SPI1, K10_LCD_FREQ, "/sdcard"))
+    {
+        Serial.println(F("ERROR: SD card mount failed!"));
+        _tft.println(F("ERROR: SD card mount failed!"));
+        return;
+    }
 
     File aFile = SD.open(AUDIO_FILENAME);
     if (!aFile || aFile.isDirectory())

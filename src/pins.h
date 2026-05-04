@@ -5,7 +5,7 @@
 #define K10_LCD_SCK       12
 #define K10_LCD_CS        14
 #define K10_LCD_DC        13
-#define K10_LCD_MISO      -1
+#define K10_LCD_MISO      41
 #define K10_LCD_RST       -1
 #define K10_LCD_BL        -1  // controlled via XL9535 (K10_XL9535_LCD_BL), not direct GPIO
 #define K10_LCD_FREQ      40000000UL
@@ -14,7 +14,6 @@
 
 // ── SD Card (shares SPI bus with LCD) ────────────────────────────────────────
 #define K10_SD_CS         40
-#define K10_SD_MISO       41
 #define K10_SD_FREQ       20000000UL
 
 // ── Camera (OV2640, 8-bit parallel) ──────────────────────────────────────────
