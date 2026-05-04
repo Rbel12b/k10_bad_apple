@@ -1,0 +1,9 @@
+# UNIHIKER K10 — 16MB flash, 5MB app, 4.375MB model, 6.5MB SPIFFS
+# model offset 0x510000 matches original DFRobot layout (merge_bin.sh)
+# Name,   Type, SubType, Offset,   Size,
+nvs,      data, nvs,     0x9000,   0x5000,
+otadata,  data, ota,     0xe000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x500000,
+model,    data, spiffs,  0x510000, 0x460000,
+spiffs,   data, spiffs,  0x970000, 0x680000,
+coredump, data, coredump,0xFF0000, 0x10000,
