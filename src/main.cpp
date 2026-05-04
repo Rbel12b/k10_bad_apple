@@ -1,21 +1,20 @@
 #define AUDIO_FILENAME "/44100_u16le.pcm"
-#define FPS 30
-// #define MJPEG_FILENAME "/220_30fps.mjpeg"
-// #define MJPEG_BUFFER_SIZE (220 * 176 * 2 / 4)
-// #define FPS 15
-#define MJPEG_FILENAME "/320_30fps.mjpeg"
-#define MJPEG_BUFFER_SIZE (320 * 240 * 2 / 4)
-#define READ_BUFFER_SIZE 2048
+#define FPS 10
+#define MJPEG_FILENAME "/320_10fps.mjpeg"
+#define MJPEG_BUFFER_SIZE (320 * 240 * 8)
+
+#define AUDIO_SAMPLE_RATE 44100
+#define AUDIO_DMA_BUF_COUNT 32
+#define AUDIO_DMA_BUF_LEN 1024
+
 #include <SD.h>
 #include <driver/i2s.h>
 #include <Wire.h>
 #include <TFT_eSPI.h>
 #include "pins.h"
+#include <TJpg_Decoder.h>
 
-TFT_eSPI _tft;
-
-#include "MjpegClass.h"
-static MjpegClass mjpeg;
+TFT_eSPI _tft(240, 320);
 
 int next_frame = 0;
 int skipped_frames = 0;
@@ -25,9 +24,16 @@ unsigned long total_read_video = 0;
 unsigned long total_play_video = 0;
 unsigned long total_remain = 0;
 unsigned long start_ms, curr_ms, next_frame_ms;
+int time_used = 0;
 
 byte _xl9535P0Out, _xl9535P1Out = 0;
 static const i2s_port_t I2S_PORT = I2S_NUM_0;
+
+volatile bool running = true;
+volatile bool audioStreamReady = false;
+volatile bool videoStreamReady = false;
+volatile bool audioStreamDone = false;
+volatile bool videoStreamDone = false;
 
 void _initXL9535()
 {
@@ -102,6 +108,245 @@ void _xl9535WritePin(uint8_t pin, bool val)
     _xl9535Flush(port);
 }
 
+void audioStreamTask(void *param)
+{
+    File aFile = SD.open(AUDIO_FILENAME);
+    if (!aFile || aFile.isDirectory())
+    {
+        log_d("ERROR: Failed to open " AUDIO_FILENAME " file for reading!");
+        _tft.println(F("ERROR: Failed to open " AUDIO_FILENAME " file for reading!"));
+        return;
+    }
+
+    uint16_t *aBuf = (uint16_t *)malloc(AUDIO_DMA_BUF_LEN); // 1 second of mono 16-bit audio
+    if (!aBuf)
+    {
+        log_d("aBuf malloc failed!");
+        return;
+    }
+
+    log_d("PCM audio start");
+
+    audioStreamReady = true;
+
+    while (!videoStreamReady || !running)
+    {
+        delay(1);
+    }
+
+    size_t bytes_written;
+    while (aFile.available())
+    {
+        // Read audio
+        size_t readBytes = aFile.read((uint8_t*)aBuf, AUDIO_DMA_BUF_LEN);
+        for (size_t i = 0; i < readBytes / 2; ++i)
+        {
+            aBuf[i] = aBuf[i] >> 8;
+        }
+        // Play audio
+        i2s_write(I2S_PORT, aBuf, readBytes, &bytes_written, portMAX_DELAY);
+        // ignore bytes_written since we use blocking write and the buffer is large enough for one chunk of audio
+    }
+
+    aFile.close();
+
+    audioStreamDone = true;
+
+    log_d("PCM audio end");
+
+    vTaskDelete(NULL);
+}
+
+#define FRAMEBUF_SIZE (320 * 240 * 4)
+
+bool readFrame(File &f, uint8_t *buf, size_t &len)
+{
+    bool started = false;
+    len = 0;
+    static uint8_t* frameBuf;
+    static size_t frameBufLen = 0;
+    static size_t frameBufPos = 0;
+    if (!frameBuf)
+    {
+        frameBuf = (uint8_t*)malloc(FRAMEBUF_SIZE);
+        if (!frameBuf)
+        {
+            log_d("frameBuf malloc failed!");
+            return false;
+        }
+    }
+
+    if (frameBufLen <= 0)
+    {
+        frameBufLen = f.read(frameBuf, FRAMEBUF_SIZE);
+        frameBufPos = 0;
+    }
+
+    while (frameBufLen > 0 || f.available())
+    {
+        uint8_t b = 0;
+        if (frameBufLen > 0)
+        {
+            b = frameBuf[frameBufPos];
+            frameBufLen--;
+            frameBufPos++;
+        }
+        else
+        {
+            frameBufLen = f.read(frameBuf, FRAMEBUF_SIZE);
+            frameBufPos = 0;
+            if (frameBufLen == 0)
+                break; // EOF
+            b = frameBuf[frameBufPos];
+            frameBufLen--;
+            frameBufPos++;
+        }
+
+        if (!started)
+        {
+            if (b == 0xFF)
+            {
+                if (frameBufLen > 0)
+                {
+                    if (frameBuf[frameBufPos] == 0xD8)
+                    {
+                        started = true;
+                        buf[len++] = b;
+                    }
+                }
+                else
+                {
+                    int nextByte = f.peek();
+                    if (nextByte == 0xD8)
+                    {
+                        started = true;
+                        buf[len++] = b;
+                    }
+                }
+            }
+        }
+        else
+        {
+            buf[len++] = b;
+
+            if (len >= MJPEG_BUFFER_SIZE)
+            {
+                log_d("Frame too large! Increase MJPEG_BUFFER_SIZE");
+                return false;
+            }
+
+            if (b == 0xD9 && buf[len - 2] == 0xFF)
+                return true;
+        }
+    }
+    return false;
+}
+
+bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap)
+{
+    _tft.pushImage(x, y, w, h, bitmap);
+    return true;
+}
+
+void videoStreamTask(void *param)
+{
+    File vFile = SD.open(MJPEG_FILENAME);
+    if (!vFile || vFile.isDirectory())
+    {
+        log_d("ERROR: Failed to open " MJPEG_FILENAME " file for reading");
+        _tft.println(F("ERROR: Failed to open " MJPEG_FILENAME " file for reading"));
+        return;
+    }
+
+    uint8_t *mjpeg_buf = (uint8_t *)malloc(MJPEG_BUFFER_SIZE);
+    if (!mjpeg_buf)
+    {
+        log_d("mjpeg_buf malloc failed!");
+        return;
+    }
+    
+    TJpgDec.setCallback(tft_output);
+
+    log_d("MJPEG video start");
+
+    videoStreamReady = true;
+
+    while (!audioStreamReady || !running)
+    {
+        delay(1);
+    }
+
+    const uint32_t frame_time = 1000 / FPS;
+    uint32_t next_frame_time = millis();
+
+    while (vFile.available() && running)
+    {
+        int32_t lag = millis() - next_frame_time;
+
+        // --- If we're behind: skip frames ---
+        if (lag > 500)
+        {
+            vTaskDelay(1);
+            log_d("Lag %d ms, skipping frames...", lag);
+            // How many frames we are behind
+            uint32_t frames_to_skip = (lag / frame_time) + 1;
+
+            for (uint32_t i = 0; i < frames_to_skip; i++)
+            {
+                size_t dummy_len = 0;
+
+                if (!readFrame(vFile, mjpeg_buf, dummy_len))
+                    break; // EOF or error
+
+                skipped_frames++;
+            }
+
+            next_frame_time += frames_to_skip * frame_time;
+
+            // After skipping, continue to next loop iteration
+            continue;
+        }
+
+        // --- Normal frame processing ---
+        size_t len = 0;
+
+        if (!readFrame(vFile, mjpeg_buf, len))
+        {
+            log_d("Failed to read frame, skipping...");
+            skipped_frames++;
+            continue;
+        }
+
+        uint32_t start = millis();
+
+        TJpgDec.drawJpg(0, 0, mjpeg_buf, len);
+
+        uint32_t elapsed = millis() - start;
+
+        next_frame_time += frame_time;
+
+        int32_t wait = next_frame_time - millis();
+
+        if (wait > 0)
+            vTaskDelay(wait / portTICK_PERIOD_MS);
+    }
+
+    vFile.close();
+    videoStreamDone = true;
+
+    log_d("MJPEG video end, skipped frames: %d", skipped_frames);
+
+    vTaskDelete(NULL);
+}
+
+void playVideo()
+{
+    xTaskCreatePinnedToCore(videoStreamTask, "videoStreamTask", 4096, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(audioStreamTask, "audioStreamTask", 4096, NULL, 1, NULL, 0);
+
+    running = true;
+}
+
 // SPIClass SPI1(2);
 
 void setup()
@@ -115,7 +360,7 @@ void setup()
 
     // Init Video
     _tft.init();
-    _tft.setRotation(2);
+    _tft.setRotation(3);
     _tft.fillScreen(TFT_BLACK);
 
     _xl9535WritePin(0, true); // backlight on after display init
@@ -125,12 +370,12 @@ void setup()
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
         .sample_rate = 44100,
         .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+        .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
         .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_STAND_PCM_SHORT | I2S_COMM_FORMAT_STAND_I2S),
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 8,
-        .dma_buf_len = 490,
-        .use_apll = false,
+        .dma_buf_count = AUDIO_DMA_BUF_COUNT,
+        .dma_buf_len = AUDIO_DMA_BUF_LEN,
+        .use_apll = true,
         .tx_desc_auto_clear = false,
         .fixed_mclk = 0,
     };
@@ -152,8 +397,7 @@ void setup()
     i2s_set_pin(I2S_PORT, &pins);
     i2s_zero_dma_buffer((i2s_port_t)0);
 
-    // Init SD card — SPI._spi is NULL here (TFT used its own instance), so begin() runs fresh with MISO=41
-    // SPI1.begin(K10_LCD_SCK, K10_LCD_MISO, K10_LCD_MOSI, -1);
+    SPI.begin(44, 41, 42, -1);
     // if (!SD.begin(K10_SD_CS, SPI, K10_SD_FREQ, "/sdcard"))
     if (!SD.begin())
     {
@@ -162,173 +406,7 @@ void setup()
         return;
     }
 
-    File aFile = SD.open(AUDIO_FILENAME);
-    if (!aFile || aFile.isDirectory())
-    {
-        log_d("ERROR: Failed to open " AUDIO_FILENAME " file for reading!");
-        _tft.println(F("ERROR: Failed to open " AUDIO_FILENAME " file for reading!"));
-        return;
-    }
-
-    File vFile = SD.open(MJPEG_FILENAME);
-    if (!vFile || vFile.isDirectory())
-    {
-        log_d("ERROR: Failed to open " MJPEG_FILENAME " file for reading");
-        _tft.println(F("ERROR: Failed to open " MJPEG_FILENAME " file for reading"));
-        return;
-    }
-
-    uint8_t *aBuf = (uint8_t *)malloc(2940);
-    // uint8_t *aBuf = (uint8_t *)malloc(5880);
-    if (!aBuf)
-    {
-        log_d("aBuf malloc failed!");
-        return;
-    }
-
-    uint8_t *mjpeg_buf = (uint8_t *)malloc(MJPEG_BUFFER_SIZE);
-    if (!mjpeg_buf)
-    {
-        log_d("mjpeg_buf malloc failed!");
-        return;
-    }
-
-    log_d("PCM audio MJPEG video start");
-    start_ms = millis();
-    curr_ms = millis();
-    mjpeg.setup(vFile, mjpeg_buf, &_tft, true);
-    next_frame_ms = start_ms + (++next_frame * 1000 / FPS);
-
-    // prefetch first audio buffer
-    size_t bytes_written;
-    aFile.read(aBuf, 2940);
-    i2s_write(I2S_PORT, aBuf, 2940, &bytes_written, portMAX_DELAY);
-
-    while (vFile.available() && aFile.available())
-    {
-        // Read audio
-        curr_ms = millis();
-        aFile.read(aBuf, 2940);
-        // aFile.read(aBuf, 5880);
-        total_read_audio += millis() - curr_ms;
-        curr_ms = millis();
-
-        // Play audio
-        i2s_write(I2S_PORT, aBuf, 2940, &bytes_written, portMAX_DELAY);
-        // // for 15 FPS
-        // i2s_write(I2S_PORT, aBuf, 5880, &bytes_written, portMAX_DELAY);
-        total_play_audio += millis() - curr_ms;
-        curr_ms = millis();
-
-        // Read video
-        mjpeg.readMjpegBuf();
-        total_read_video += millis() - curr_ms;
-        curr_ms = millis();
-
-        if (millis() < next_frame_ms) // check show frame or skip frame
-        {
-            // Play video
-            mjpeg.drawJpg();
-            total_play_video += millis() - curr_ms;
-
-            int remain_ms = next_frame_ms - millis();
-            total_remain += remain_ms;
-            if (remain_ms > 0)
-            {
-                delay(remain_ms);
-            }
-        }
-        else
-        {
-            ++skipped_frames;
-            log_d("Skip frame");
-        }
-
-        curr_ms = millis();
-        next_frame_ms = start_ms + (++next_frame * 1000 / FPS);
-    }
-    int time_used = millis() - start_ms;
-    log_d("PCM audio MJPEG video end");
-    vFile.close();
-    aFile.close();
-    int played_frames = next_frame - 1 - skipped_frames;
-    float fps = 1000.0 * played_frames / time_used;
-    log_d("Played frames: %d\n", played_frames);
-    log_d("Skipped frames: %d (%0.1f %%)\n", skipped_frames, 100.0 * skipped_frames / played_frames);
-    log_d("Time used: %d ms\n", time_used);
-    log_d("Expected FPS: %d\n", FPS);
-    log_d("Actual FPS: %0.1f\n", fps);
-    log_d("SDMMC read PCM: %d ms (%0.1f %%)\n", total_read_audio, 100.0 * total_read_audio / time_used);
-    log_d("Play audio: %d ms (%0.1f %%)\n", total_play_audio, 100.0 * total_play_audio / time_used);
-    log_d("SDMMC read MJPEG: %d ms (%0.1f %%)\n", total_read_video, 100.0 * total_read_video / time_used);
-    log_d("Play video: %d ms (%0.1f %%)\n", total_play_video, 100.0 * total_play_video / time_used);
-    log_d("Remain: %d ms (%0.1f %%)\n", total_remain, 100.0 * total_remain / time_used);
-
-#define CHART_MARGIN 24
-#define LEGEND_A_COLOR 0xE0C3
-#define LEGEND_B_COLOR 0x33F7
-#define LEGEND_C_COLOR 0x4D69
-#define LEGEND_D_COLOR 0x9A74
-#define LEGEND_E_COLOR 0xFBE0
-#define LEGEND_F_COLOR 0xFFE6
-#define LEGEND_G_COLOR 0xA2A5
-    _tft.setCursor(0, 0);
-    _tft.setTextColor(TFT_WHITE);
-    _tft.printf("Played frames: %d\n", played_frames);
-    _tft.printf("Skipped frames: %d (%0.1f %%)\n", skipped_frames, 100.0 * skipped_frames / played_frames);
-    _tft.printf("Actual FPS: %0.1f\n\n", fps);
-    int16_t r1 = ((_tft.height() - CHART_MARGIN - CHART_MARGIN) / 2);
-    int16_t r2 = r1 / 2;
-    int16_t cx = _tft.width() - _tft.height() + CHART_MARGIN + CHART_MARGIN - 1 + r1;
-    int16_t cy = r1 + CHART_MARGIN;
-    float arc_start = 0;
-    float arc_end = max(2.0, 360.0 * total_read_audio / time_used);
-    for (int i = arc_start + 1; i < arc_end; i += 2)
-    {
-        _tft.drawArc(cx, cy, r1, r2, arc_start - 90.0, i - 90.0, LEGEND_D_COLOR, LEGEND_D_COLOR);
-    }
-    _tft.drawArc(cx, cy, r1, r2, arc_start - 90.0, arc_end - 90.0, LEGEND_D_COLOR, LEGEND_D_COLOR);
-    _tft.setTextColor(LEGEND_D_COLOR);
-    _tft.printf("Read PCM:\n%0.1f %%\n", 100.0 * total_read_audio / time_used);
-
-    arc_start = arc_end;
-    arc_end += max(2.0, 360.0 * total_play_audio / time_used);
-    for (int i = arc_start + 1; i < arc_end; i += 2)
-    {
-        _tft.drawArc(cx, cy, r1, r2, arc_start - 90.0, i - 90.0, LEGEND_C_COLOR, LEGEND_C_COLOR);
-    }
-    _tft.drawArc(cx, cy, r1, r2, arc_start - 90.0, arc_end - 90.0, LEGEND_C_COLOR, LEGEND_C_COLOR);
-    _tft.setTextColor(LEGEND_C_COLOR);
-    _tft.printf("Play audio:\n%0.1f %%\n", 100.0 * total_play_audio / time_used);
-
-    arc_start = arc_end;
-    arc_end += max(2.0, 360.0 * total_read_video / time_used);
-    for (int i = arc_start + 1; i < arc_end; i += 2)
-    {
-        _tft.drawArc(cx, cy, r1, r2, arc_start - 90.0, i - 90.0, LEGEND_B_COLOR, LEGEND_B_COLOR);
-    }
-    _tft.drawArc(cx, cy, r1, r2, arc_start - 90.0, arc_end - 90.0, LEGEND_B_COLOR, LEGEND_B_COLOR);
-    _tft.setTextColor(LEGEND_B_COLOR);
-    _tft.printf("Read MJPEG:\n%0.1f %%\n", 100.0 * total_read_video / time_used);
-
-    arc_start = arc_end;
-    arc_end += max(2.0, 360.0 * total_play_video / time_used);
-    for (int i = arc_start + 1; i < arc_end; i += 2)
-    {
-        _tft.drawArc(cx, cy, r1, 0, arc_start - 90.0, i - 90.0, LEGEND_A_COLOR, LEGEND_A_COLOR);
-    }
-    _tft.drawArc(cx, cy, r1, 0, arc_start - 90.0, arc_end - 90.0, LEGEND_A_COLOR, LEGEND_A_COLOR);
-    _tft.setTextColor(LEGEND_A_COLOR);
-    _tft.printf("Play video:\n%0.1f %%\n", 100.0 * total_play_video / time_used);
-
-    i2s_driver_uninstall((i2s_port_t)0); // stop & destroy i2s driver
-    // avoid unexpected output at audio pins
-    pinMode(25, OUTPUT);
-    digitalWrite(25, LOW);
-    pinMode(26, OUTPUT);
-    digitalWrite(26, LOW);
-    // _tft.displayOff();
-    // esp_deep_sleep_start();
+    playVideo();
 }
 
 void loop()
