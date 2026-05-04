@@ -22,7 +22,7 @@
       ["0x303A", "0x1001"]
     ],
     "mcu": "esp32s3",
-    "variant": "esp32s3"
+    "variant": "unihiker_k10"
   },
   "connectivity": ["bluetooth", "wifi"],
   "debug": {

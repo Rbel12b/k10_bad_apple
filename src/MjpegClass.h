@@ -77,18 +77,18 @@ public:
           }
         }
 
-        // Serial.printf("i: %d\n", i);
+        // log_d("i: %d\n", i);
         memcpy(_mjpeg_buf + _mjpeg_buf_offset, _read_buf, i);
         _mjpeg_buf_offset += i;
         size_t o = _buf_read - i;
         if (o > 0)
         {
-          // Serial.printf("o: %d\n", o);
+          // log_d("o: %d\n", o);
           memcpy(_read_buf, _read_buf + i, o);
           _buf_read = _input.read(_read_buf + o, READ_BUFFER_SIZE - o);
           _inputindex += _buf_read;
           _buf_read += o;
-          // Serial.printf("_buf_read: %d\n", _buf_read);
+          // log_d("_buf_read: %d\n", _buf_read);
         }
         else
         {
@@ -113,7 +113,7 @@ public:
     TJpgD::JRESULT jres = _jdec.prepare(jpgRead, this);
     if (jres != TJpgD::JDR_OK)
     {
-      Serial.printf("prepare failed! %d\r\n", jres);
+      log_d("prepare failed! %d\r\n", jres);
       return false;
     }
 
@@ -151,7 +151,7 @@ public:
 
     if (jres != TJpgD::JDR_OK)
     {
-      Serial.printf("decomp failed! %d\r\n", jres);
+      log_d("decomp failed! %d\r\n", jres);
       return false;
     }
     return true;

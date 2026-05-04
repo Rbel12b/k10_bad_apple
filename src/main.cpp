@@ -1,12 +1,11 @@
 #define AUDIO_FILENAME "/44100_u16le.pcm"
 #define FPS 30
-#define MJPEG_FILENAME "/220_30fps.mjpeg"
-#define MJPEG_BUFFER_SIZE (220 * 176 * 2 / 4)
+// #define MJPEG_FILENAME "/220_30fps.mjpeg"
+// #define MJPEG_BUFFER_SIZE (220 * 176 * 2 / 4)
 // #define FPS 15
-// #define MJPEG_FILENAME "/320_15fps.mjpeg"
-// #define MJPEG_BUFFER_SIZE (320 * 240 * 2 / 4)
+#define MJPEG_FILENAME "/320_30fps.mjpeg"
+#define MJPEG_BUFFER_SIZE (320 * 240 * 2 / 4)
 #define READ_BUFFER_SIZE 2048
-#include <WiFi.h>
 #include <SD.h>
 #include <driver/i2s.h>
 #include <Wire.h>
@@ -103,19 +102,16 @@ void _xl9535WritePin(uint8_t pin, bool val)
     _xl9535Flush(port);
 }
 
-SPIClass SPI1(HSPI);
+// SPIClass SPI1(2);
 
 void setup()
 {
-    WiFi.mode(WIFI_OFF);
     Serial.begin(115200);
 
     Wire.setTimeOut(100);
     Wire.begin(K10_I2C_SDA, K10_I2C_SCL, K10_I2C_FREQ);
     Wire.setTimeOut(100);
     _initXL9535();
-
-    SPI1.begin(K10_LCD_SCK, K10_LCD_MISO, K10_LCD_MOSI, -1);
 
     // Init Video
     _tft.init();
@@ -148,7 +144,7 @@ void setup()
 
     if (i2s_driver_install(I2S_PORT, &cfg, 0, nullptr) != ESP_OK)
     {
-        Serial.println(F("ERROR: Unable to install I2S drives!"));
+        log_d("ERROR: Unable to install I2S drives!");
         _tft.println(F("ERROR: Unable to install I2S drives!"));
         return;
     }
@@ -156,10 +152,12 @@ void setup()
     i2s_set_pin(I2S_PORT, &pins);
     i2s_zero_dma_buffer((i2s_port_t)0);
 
-    // Init SD card
-    if (!SD.begin(K10_SD_CS, SPI1, K10_LCD_FREQ, "/sdcard"))
+    // Init SD card — SPI._spi is NULL here (TFT used its own instance), so begin() runs fresh with MISO=41
+    // SPI1.begin(K10_LCD_SCK, K10_LCD_MISO, K10_LCD_MOSI, -1);
+    // if (!SD.begin(K10_SD_CS, SPI, K10_SD_FREQ, "/sdcard"))
+    if (!SD.begin())
     {
-        Serial.println(F("ERROR: SD card mount failed!"));
+        log_d("ERROR: SD card mount failed!");
         _tft.println(F("ERROR: SD card mount failed!"));
         return;
     }
@@ -167,7 +165,7 @@ void setup()
     File aFile = SD.open(AUDIO_FILENAME);
     if (!aFile || aFile.isDirectory())
     {
-        Serial.println(F("ERROR: Failed to open " AUDIO_FILENAME " file for reading!"));
+        log_d("ERROR: Failed to open " AUDIO_FILENAME " file for reading!");
         _tft.println(F("ERROR: Failed to open " AUDIO_FILENAME " file for reading!"));
         return;
     }
@@ -175,7 +173,7 @@ void setup()
     File vFile = SD.open(MJPEG_FILENAME);
     if (!vFile || vFile.isDirectory())
     {
-        Serial.println(F("ERROR: Failed to open " MJPEG_FILENAME " file for reading"));
+        log_d("ERROR: Failed to open " MJPEG_FILENAME " file for reading");
         _tft.println(F("ERROR: Failed to open " MJPEG_FILENAME " file for reading"));
         return;
     }
@@ -184,18 +182,18 @@ void setup()
     // uint8_t *aBuf = (uint8_t *)malloc(5880);
     if (!aBuf)
     {
-        Serial.println(F("aBuf malloc failed!"));
+        log_d("aBuf malloc failed!");
         return;
     }
 
     uint8_t *mjpeg_buf = (uint8_t *)malloc(MJPEG_BUFFER_SIZE);
     if (!mjpeg_buf)
     {
-        Serial.println(F("mjpeg_buf malloc failed!"));
+        log_d("mjpeg_buf malloc failed!");
         return;
     }
 
-    Serial.println(F("PCM audio MJPEG video start"));
+    log_d("PCM audio MJPEG video start");
     start_ms = millis();
     curr_ms = millis();
     mjpeg.setup(vFile, mjpeg_buf, &_tft, true);
@@ -243,28 +241,28 @@ void setup()
         else
         {
             ++skipped_frames;
-            Serial.println(F("Skip frame"));
+            log_d("Skip frame");
         }
 
         curr_ms = millis();
         next_frame_ms = start_ms + (++next_frame * 1000 / FPS);
     }
     int time_used = millis() - start_ms;
-    Serial.println(F("PCM audio MJPEG video end"));
+    log_d("PCM audio MJPEG video end");
     vFile.close();
     aFile.close();
     int played_frames = next_frame - 1 - skipped_frames;
     float fps = 1000.0 * played_frames / time_used;
-    Serial.printf("Played frames: %d\n", played_frames);
-    Serial.printf("Skipped frames: %d (%0.1f %%)\n", skipped_frames, 100.0 * skipped_frames / played_frames);
-    Serial.printf("Time used: %d ms\n", time_used);
-    Serial.printf("Expected FPS: %d\n", FPS);
-    Serial.printf("Actual FPS: %0.1f\n", fps);
-    Serial.printf("SDMMC read PCM: %d ms (%0.1f %%)\n", total_read_audio, 100.0 * total_read_audio / time_used);
-    Serial.printf("Play audio: %d ms (%0.1f %%)\n", total_play_audio, 100.0 * total_play_audio / time_used);
-    Serial.printf("SDMMC read MJPEG: %d ms (%0.1f %%)\n", total_read_video, 100.0 * total_read_video / time_used);
-    Serial.printf("Play video: %d ms (%0.1f %%)\n", total_play_video, 100.0 * total_play_video / time_used);
-    Serial.printf("Remain: %d ms (%0.1f %%)\n", total_remain, 100.0 * total_remain / time_used);
+    log_d("Played frames: %d\n", played_frames);
+    log_d("Skipped frames: %d (%0.1f %%)\n", skipped_frames, 100.0 * skipped_frames / played_frames);
+    log_d("Time used: %d ms\n", time_used);
+    log_d("Expected FPS: %d\n", FPS);
+    log_d("Actual FPS: %0.1f\n", fps);
+    log_d("SDMMC read PCM: %d ms (%0.1f %%)\n", total_read_audio, 100.0 * total_read_audio / time_used);
+    log_d("Play audio: %d ms (%0.1f %%)\n", total_play_audio, 100.0 * total_play_audio / time_used);
+    log_d("SDMMC read MJPEG: %d ms (%0.1f %%)\n", total_read_video, 100.0 * total_read_video / time_used);
+    log_d("Play video: %d ms (%0.1f %%)\n", total_play_video, 100.0 * total_play_video / time_used);
+    log_d("Remain: %d ms (%0.1f %%)\n", total_remain, 100.0 * total_remain / time_used);
 
 #define CHART_MARGIN 24
 #define LEGEND_A_COLOR 0xE0C3

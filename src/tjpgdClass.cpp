@@ -933,7 +933,7 @@ static void task_output(void* arg)
 	for (;;) {
 		if (!xQueueReceive(p->sem, &q, portMAX_DELAY)) continue;
 		if (!q) break;
-//Serial.printf("task work: X=%d,Y=%d\r\n",q->x,q->y);
+//log_d("task work: X=%d,Y=%d\r\n",q->x,q->y);
 		if (q->h == 0) {
 			mcu_output(p->jd, q->mcubuf, workbuf, p->outfunc, q->x, q->y);
 		} else {
@@ -951,7 +951,7 @@ void TJpgD::multitask_begin ()
 {
 	param.sem = xQueueCreate(queue_max + 1, sizeof(queue_t*));
 
-	xTaskCreatePinnedToCore(task_output, "task_output", 1600, &param, 1, &param.task, 0);
+	xTaskCreatePinnedToCore(task_output, "task_output", 4096, &param, 1, &param.task, 0);
 }
 
 void TJpgD::multitask_end ()
