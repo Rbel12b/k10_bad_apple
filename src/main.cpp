@@ -1,6 +1,4 @@
-#define AUDIO_FILENAME "/44100_u16le.pcm"
 #define FPS 10
-#define MJPEG_FILENAME "/320_10fps.mjpeg"
 #define MJPEG_BUFFER_SIZE (320 * 240 * 8)
 
 #define AUDIO_SAMPLE_RATE 44100
@@ -13,6 +11,8 @@
 #include <TFT_eSPI.h>
 #include "pins.h"
 #include <TJpg_Decoder.h>
+#include <vector>
+#include <string>
 
 TFT_eSPI _tft(240, 320);
 
@@ -26,14 +26,17 @@ unsigned long total_remain = 0;
 unsigned long start_ms, curr_ms, next_frame_ms;
 int time_used = 0;
 
-byte _xl9535P0Out, _xl9535P1Out = 0;
+byte _xl9535P0Out = 0, _xl9535P1Out = 0, _xl9535P0In = 0, _xl9535P1In = 0;
 static const i2s_port_t I2S_PORT = I2S_NUM_0;
 
-volatile bool running = true;
+volatile bool running = false;
 volatile bool audioStreamReady = false;
 volatile bool videoStreamReady = false;
 volatile bool audioStreamDone = false;
 volatile bool videoStreamDone = false;
+
+std::string audioFile;
+std::string videoFile;
 
 void _initXL9535()
 {
@@ -108,13 +111,39 @@ void _xl9535WritePin(uint8_t pin, bool val)
     _xl9535Flush(port);
 }
 
+bool _xl9535ReadPin(uint8_t pin) {
+    // Uses cached input registers — no I2C. Call _xl9535RefreshInputs() first.
+    uint8_t port = pin / 8;
+    uint8_t bit  = pin % 8;
+    uint8_t val  = (port == 0) ? _xl9535P0In : _xl9535P1In;
+    return !(val & (1 << bit));  // active LOW → invert
+}
+
+void _xl9535RefreshInputs() {
+    Wire.beginTransmission(K10_XL9535_ADDR);
+    Wire.write(0x00);
+    uint8_t err = Wire.endTransmission();
+    if (err) { log_e("XL9535 refresh p0 ptr err=%d", err); return; }
+    uint8_t n = Wire.requestFrom((uint8_t)K10_XL9535_ADDR, (uint8_t)1);
+    if (n >= 1) _xl9535P0In = Wire.read();
+    else { log_e("XL9535 refresh p0 read err"); return; }
+
+    Wire.beginTransmission(K10_XL9535_ADDR);
+    Wire.write(0x01);
+    err = Wire.endTransmission();
+    if (err) { log_e("XL9535 refresh p1 ptr err=%d", err); return; }
+    n = Wire.requestFrom((uint8_t)K10_XL9535_ADDR, (uint8_t)1);
+    if (n >= 1) _xl9535P1In = Wire.read();
+    else { log_e("XL9535 refresh p1 read err"); }
+}
+
 void audioStreamTask(void *param)
 {
-    File aFile = SD.open(AUDIO_FILENAME);
+    File aFile = SD.open(("/" + audioFile).c_str());
     if (!aFile || aFile.isDirectory())
     {
-        log_d("ERROR: Failed to open " AUDIO_FILENAME " file for reading!");
-        _tft.println(F("ERROR: Failed to open " AUDIO_FILENAME " file for reading!"));
+        log_d("ERROR: Failed to open %s file for reading!", audioFile.c_str());
+        _tft.printf("ERROR: Failed to open %s file for reading!\n", audioFile.c_str());
         return;
     }
 
@@ -135,7 +164,7 @@ void audioStreamTask(void *param)
     }
 
     size_t bytes_written;
-    while (aFile.available())
+    while (aFile.available() && running)
     {
         // Read audio
         size_t readBytes = aFile.read((uint8_t*)aBuf, AUDIO_DMA_BUF_LEN);
@@ -150,9 +179,9 @@ void audioStreamTask(void *param)
 
     aFile.close();
 
-    audioStreamDone = true;
-
     log_d("PCM audio end");
+
+    audioStreamDone = true;
 
     vTaskDelete(NULL);
 }
@@ -250,11 +279,11 @@ bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap)
 
 void videoStreamTask(void *param)
 {
-    File vFile = SD.open(MJPEG_FILENAME);
+    File vFile = SD.open(("/" + videoFile).c_str());
     if (!vFile || vFile.isDirectory())
     {
-        log_d("ERROR: Failed to open " MJPEG_FILENAME " file for reading");
-        _tft.println(F("ERROR: Failed to open " MJPEG_FILENAME " file for reading"));
+        log_d("ERROR: Failed to open %s file for reading", videoFile.c_str());
+        _tft.printf("ERROR: Failed to open %s file for reading\n", videoFile.c_str());
         return;
     }
 
@@ -266,6 +295,7 @@ void videoStreamTask(void *param)
     }
     
     TJpgDec.setCallback(tft_output);
+    TJpgDec.setSwapBytes(true);
 
     log_d("MJPEG video start");
 
@@ -332,24 +362,29 @@ void videoStreamTask(void *param)
     }
 
     vFile.close();
-    videoStreamDone = true;
 
     _tft.fillScreen(TFT_BLACK);
 
     log_d("MJPEG video end, skipped frames: %d", skipped_frames);
 
+    videoStreamDone = true;
     vTaskDelete(NULL);
 }
 
 void playVideo()
 {
+    running = false;
+    audioStreamReady = false;
+    videoStreamReady = false;
+    audioStreamDone = false;
+    videoStreamDone = false;
+
     xTaskCreatePinnedToCore(videoStreamTask, "videoStreamTask", 4096, NULL, 1, NULL, 1);
+    delay(50);
     xTaskCreatePinnedToCore(audioStreamTask, "audioStreamTask", 4096, NULL, 1, NULL, 0);
 
     running = true;
 }
-
-// SPIClass SPI1(2);
 
 void setup()
 {
@@ -408,14 +443,169 @@ void setup()
         return;
     }
 
-    playVideo();
+    _tft.fillScreen(TFT_BLACK);
 }
+
+std::vector<std::string> listFiles(const char* path)
+{
+    std::vector<std::string> files;
+    File root = SD.open(path);
+    if (!root || !root.isDirectory())
+    {
+        log_d("Failed to open directory");
+        return files;
+    }
+
+    File file = root.openNextFile();
+    while (file)
+    {
+        if (!file.isDirectory())
+        {
+            log_d("File: %s", file.name());
+            files.push_back(file.name());
+        }
+        file = root.openNextFile();
+    }
+    return files;
+}
+
+std::vector<std::string> filterAudioFiles(const std::vector<std::string>& files)
+{
+    std::vector<std::string> audioFiles;
+    for (const auto& file : files)
+    {
+        if (file.find(".pcm") != std::string::npos)
+        {
+            log_d("audio file: %s", file.c_str());
+            audioFiles.push_back(file);
+        }
+    }
+    return audioFiles;
+}
+
+std::vector<std::string> filterVideoFiles(const std::vector<std::string>& files)
+{
+    std::vector<std::string> videoFiles;
+    for (const auto& file : files)
+    {
+        if (file.find(".mjpeg")  != std::string::npos)
+        {
+            log_d("video file: %s", file.c_str());
+            videoFiles.push_back(file);
+        }
+    }
+    return videoFiles;
+}
+
+std::vector<std::string> audioFiles;
+std::vector<std::string> videoFiles;
+
+bool filesListed = false;
+enum class State
+{
+    FILE_SELECT,
+    PLAY,
+};
+State state = State::FILE_SELECT;
+uint8_t cursor = 0, audioIndex = 0, videoIndex = 0;
+bool lastA = false, lastB = false;
 
 void loop()
 {
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(1));
     while (Serial.available()) {
         if (Serial.read() == 0x03)
             ESP.restart();
+    }
+
+    _xl9535RefreshInputs();
+
+    if (!filesListed) {
+        auto files = listFiles("/");
+        audioFiles = filterAudioFiles(files);
+        videoFiles = filterVideoFiles(files);
+        audioFile = audioFiles.size() > audioIndex ? audioFiles[audioIndex] : "";
+        videoFile = videoFiles.size() > videoIndex ? videoFiles[videoIndex] : "";
+        filesListed = true;
+    }
+
+    switch (state)
+    {
+    case State::FILE_SELECT:
+        {
+            _tft.setCursor(10, 0);
+            _tft.printf("Video file: %s\n", videoFile.c_str());
+            _tft.setCursor(10, 8);
+            _tft.printf("Audio file: %s\n", audioFile.c_str());
+            _tft.setCursor(10, 16);
+            _tft.printf("Start");
+            for (uint8_t i = 0; i < 3; i++)
+            {
+                _tft.fillRect(0, i * 8, 8, 8, cursor == i ? 0xFFFFFF : 0);
+            }
+            if (_xl9535ReadPin(K10_XL9535_BTN_A) != lastA)
+            {
+                lastA = _xl9535ReadPin(K10_XL9535_BTN_A);
+                if (lastA)
+                {
+                    cursor++;
+                    if (cursor >= 3)
+                    {
+                        cursor = 0;
+                    }
+                }
+            }
+            if (_xl9535ReadPin(K10_XL9535_BTN_B) != lastB)
+            {
+                lastB = _xl9535ReadPin(K10_XL9535_BTN_B);
+                if (lastB)
+                {
+                    _tft.fillScreen(TFT_BLACK);
+                    switch (cursor)
+                    {
+                    case 0:
+                        videoIndex++;
+                        if (videoIndex >= videoFiles.size())
+                        {
+                            videoIndex = 0;
+                        }
+                        videoFile = videoFiles.size() > videoIndex ? videoFiles[videoIndex] : "";
+                        break;
+                    case 1:
+                        audioIndex++;
+                        if (audioIndex >= audioFiles.size())
+                        {
+                            audioIndex = 0;
+                        }
+                        audioFile = audioFiles.size() > audioIndex ? audioFiles[audioIndex] : "";
+                        break;
+                    case 2:
+                        state = State::PLAY;
+                        break;
+                    
+                    default:
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+
+    case State::PLAY:
+        {
+            if (!running)
+            {
+                playVideo();
+            }
+            if (videoStreamDone && audioStreamDone)
+            {
+                running = false;
+                state = State::FILE_SELECT;
+            }
+            break;
+        }
+    
+    default:
+        break;
     }
 }
