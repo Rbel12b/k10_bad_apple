@@ -1,6 +1,6 @@
 #pragma once
 
-// ── Display (ILI9341, SPI shared with SD) ────────────────────────────────────
+// ── Display (ILI9341) ────────────────────────────────────────────────────────
 #define K10_LCD_MOSI      21
 #define K10_LCD_SCK       12
 #define K10_LCD_CS        14
@@ -12,12 +12,12 @@
 #define K10_LCD_WIDTH     320
 #define K10_LCD_HEIGHT    240
 
-// ── SD Card (shares SPI bus with LCD) ────────────────────────────────────────
+// ── SD Card ──────────────────────────────────────────────────────────────────
 #define K10_SD_CS         40
 #define K10_SD_SCK        44
 #define K10_SD_MISO       41
 #define K10_SD_MOSI       42
-#define K10_SD_FREQ       20000000UL
+#define K10_SD_FREQ       40000000UL
 
 // ── Camera (OV2640, 8-bit parallel) ──────────────────────────────────────────
 #define K10_CAM_XCLK      7
